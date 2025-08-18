@@ -37,7 +37,9 @@ A feature-rich auto-clicker and macro recording tool built with Python and the F
     *   Python 3.x
     *   Install the required packages:
         ```bash
-        pip install flet[all] pynput
+        python -m venv .venv
+        .venv\Scripts\activate
+        pip install flet[all] pynput pillow
         ```
 
 2.  **Running the Application:**
@@ -47,7 +49,7 @@ A feature-rich auto-clicker and macro recording tool built with Python and the F
 
 3.  **Building the Application:**
     ```bash
-    flet pack autoclicker.py
+    flet pack autoclicker.py --icon icon.png
     ```
 
 ## How to Use
