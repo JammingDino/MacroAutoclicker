@@ -1,9 +1,11 @@
-
 import flet as ft
 import threading
 import time
 import json
 from pynput import mouse, keyboard
+
+# Define a default keypress hold duration
+DEFAULT_KEYPRESS_HOLD_DURATION = 0.05 # seconds (50 milliseconds)
 
 class AutoClickerLogic:
     def __init__(self, page: ft.Page):
@@ -16,6 +18,7 @@ class AutoClickerLogic:
         self.click_thread = None
         self.hotkey_listener = None
         self.mouse_listener = None
+        self.keyboard_listener = None
 
         # UI elements
         self.delay_entry = None
@@ -26,7 +29,8 @@ class AutoClickerLogic:
         self.macro_list_column = None
         self.loop_macro_switch = None
         self.global_delay_entry = None
-        self.mouse_pos_label = None  # New: Mouse position label
+        self.mouse_pos_label = None
+
         self.file_picker = ft.FilePicker(on_result=self.on_file_picker_result)
         self.page.overlay.append(self.file_picker)
         self.page.update()
@@ -69,12 +73,12 @@ class AutoClickerLogic:
         self.update_status("Auto-clicking")
         self.autoclick_button.text = "Stop Auto-Click (F6)"
         self.page.update()
-        
+
         try:
             delay = float(self.delay_entry.value)
         except ValueError:
             delay = 0.1
-        
+
         self.click_thread = threading.Thread(target=self.autoclick_worker, args=(delay,), daemon=True)
         self.click_thread.start()
 
@@ -97,7 +101,11 @@ class AutoClickerLogic:
             self.start_macro()
 
     def start_macro(self):
-        self.save_macro_from_entries()
+        self.save_macro_from_entries() # Save current UI edits to macro list
+        if not self.macro:
+            self.update_status("Macro is empty. Record or add actions.")
+            return
+
         self.macro_running = True
         self.update_status("Running Macro")
         self.run_macro_button.text = "Stop Macro (F8)"
@@ -111,15 +119,39 @@ class AutoClickerLogic:
         self.run_macro_button.text = "Run Macro (F8)"
         self.page.update()
 
+    def _parse_key_from_string(self, key_str):
+        # Converts a string representation of a key back into a pynput key object
+        if key_str.startswith("'") and key_str.endswith("'"):
+            return key_str.strip("'")
+        elif key_str.startswith("<Key.") and key_str.endswith(">"):
+            key_name = key_str[5:-1] # Extract 'f6' from '<Key.f6>'
+            try:
+                return getattr(keyboard.Key, key_name)
+            except AttributeError:
+                print(f"Warning: Could not find pynput.keyboard.Key.{key_name}")
+                return None
+        return None
+
     def macro_worker(self):
         mouse_controller = mouse.Controller()
+        keyboard_controller = keyboard.Controller()
         while self.macro_running:
             for action in self.macro:
                 if not self.macro_running:
                     break
                 if action['type'] == 'click':
                     mouse_controller.position = (action['x'], action['y'])
-                    mouse_controller.click(mouse.Button.left, 1)
+                    button_to_click = mouse.Button.left
+                    if action['button'] == str(mouse.Button.right):
+                        button_to_click = mouse.Button.right
+                    mouse_controller.click(button_to_click, 1)
+                elif action['type'] == 'key_press':
+                    key_to_press = self._parse_key_from_string(action['key'])
+                    if key_to_press:
+                        keyboard_controller.press(key_to_press)
+                        # Ensure there's a small delay to register the key press effectively
+                        time.sleep(action.get('hold_duration', DEFAULT_KEYPRESS_HOLD_DURATION))
+                        keyboard_controller.release(key_to_press)
                 elif action['type'] == 'delay':
                     time.sleep(action['duration'])
             if not self.loop_macro:
@@ -140,6 +172,9 @@ class AutoClickerLogic:
         self.page.update()
         self.mouse_listener = mouse.Listener(on_click=self.on_record_click)
         self.mouse_listener.start()
+        # Suppress hotkeys during recording to prevent them from being recorded as macro actions
+        self.keyboard_listener = keyboard.Listener(on_press=self.on_record_key_press, suppress=True)
+        self.keyboard_listener.start()
 
     def stop_recording(self):
         self.recording = False
@@ -148,15 +183,34 @@ class AutoClickerLogic:
         self.page.update()
         if self.mouse_listener:
             self.mouse_listener.stop()
+        if self.keyboard_listener:
+            self.keyboard_listener.stop()
 
     def on_record_click(self, x, y, button, pressed):
         if self.recording and pressed:
-            if self.macro and self.macro[-1]['type'] == 'click':
+            # Add delay if previous action was also an interaction
+            if self.macro and (self.macro[-1]['type'] == 'click' or self.macro[-1]['type'] == 'key_press'):
                 delay = time.time() - self.macro[-1]['time']
                 self.macro.append({'type': 'delay', 'duration': delay})
-            
+
             self.macro.append({'type': 'click', 'x': x, 'y': y, 'button': str(button), 'time': time.time()})
             self.page.run_thread(self.update_macro_view)
+
+    def on_record_key_press(self, key):
+        if self.recording:
+            # Avoid recording the hotkeys themselves (F6, F7, F8)
+            if key in [keyboard.Key.f6, keyboard.Key.f7, keyboard.Key.f8]:
+                return
+
+            # Add delay if previous action was also an interaction
+            if self.macro and (self.macro[-1]['type'] == 'click' or self.macro[-1]['type'] == 'key_press'):
+                delay = time.time() - self.macro[-1]['time']
+                self.macro.append({'type': 'delay', 'duration': delay})
+
+            # Store key as its string representation and include default hold duration
+            self.macro.append({'type': 'key_press', 'key': str(key), 'time': time.time(), 'hold_duration': DEFAULT_KEYPRESS_HOLD_DURATION})
+            self.page.run_thread(self.update_macro_view)
+
 
     def clear_macro(self, e):
         self.macro = []
@@ -166,13 +220,19 @@ class AutoClickerLogic:
         if self.macro:
             last_action = self.macro[-1]
             duplicated_action = last_action.copy()
-            if duplicated_action['type'] == 'click':
-                duplicated_action['time'] = time.time()
+            if duplicated_action['type'] == 'click' or duplicated_action['type'] == 'key_press':
+                duplicated_action['time'] = time.time() # Update timestamp for new action
             self.macro.append(duplicated_action)
-            self.update_macro_view()
+            self.page.run_thread(self.update_macro_view) # Use page.run_thread for UI updates
 
     def add_click_action(self, e):
-        self.macro.append({'type': 'click', 'x': 0, 'y': 0, 'button': 'Button.left', 'time': time.time()})
+        # Default to left click at (0,0)
+        self.macro.append({'type': 'click', 'x': 0, 'y': 0, 'button': str(mouse.Button.left), 'time': time.time()})
+        self.update_macro_view()
+
+    def add_key_action(self, e):
+        # Default to 'a' key with default hold duration
+        self.macro.append({'type': 'key_press', 'key': "'a'", 'time': time.time(), 'hold_duration': DEFAULT_KEYPRESS_HOLD_DURATION})
         self.update_macro_view()
 
     def add_delay_action(self, e):
@@ -192,27 +252,37 @@ class AutoClickerLogic:
     def toggle_loop_macro(self, e):
         self.loop_macro = e.control.value
 
-    def save_macro_from_entries(self):
+    def save_macro_from_entries(self, e=None): # Added e=None to make it callable without an event
         new_macro = []
         for action in self.macro:
             if action['type'] == 'click':
                 try:
-                    x = int(action['x_field'].value)
-                    y = int(action['y_field'].value)
-                    new_macro.append({'type': 'click', 'x': x, 'y': y, 'button': action['button'], 'time': action['time']})
+                    # Get value from TextField if it exists, otherwise use existing value
+                    x = int(action['x_field'].value) if 'x_field' in action and action['x_field'].value else action['x']
+                    y = int(action['y_field'].value) if 'y_field' in action and action['y_field'].value else action['y']
+                    # Preserve the original button (not directly editable in UI currently)
+                    button = action['button']
+                    new_macro.append({'type': 'click', 'x': x, 'y': y, 'button': button, 'time': action.get('time', time.time())})
                 except (ValueError, AttributeError):
-                    new_macro.append(action)
+                    new_macro.append(action) # Keep original if parsing fails
             elif action['type'] == 'delay':
                 try:
-                    duration = float(action['duration_field'].value)
+                    duration = float(action['duration_field'].value) if 'duration_field' in action and action['duration_field'].value else action['duration']
                     new_macro.append({'type': 'delay', 'duration': duration})
                 except (ValueError, AttributeError):
                     new_macro.append(action)
+            elif action['type'] == 'key_press':
+                try:
+                    key_val = action['key_field'].value if 'key_field' in action and action['key_field'].value else action['key']
+                    hold_duration = float(action['hold_duration_field'].value) if 'hold_duration_field' in action and action['hold_duration_field'].value else action.get('hold_duration', DEFAULT_KEYPRESS_HOLD_DURATION)
+                    new_macro.append({'type': 'key_press', 'key': key_val, 'time': action.get('time', time.time()), 'hold_duration': hold_duration})
+                except (AttributeError, ValueError):
+                    new_macro.append(action)
         self.macro = new_macro
-        self.update_macro_view()
+        # self.page.update() # No need to update page here, on_change will trigger full view refresh
 
     def save_macro_to_file(self, e):
-        self.save_macro_from_entries()
+        self.save_macro_from_entries() # Ensure macro list is up-to-date with UI fields before saving
         self.file_picker.save_file(allowed_extensions=["json"])
 
     def load_macro_from_file(self, e):
@@ -220,11 +290,31 @@ class AutoClickerLogic:
 
     def on_file_picker_result(self, e: ft.FilePickerResultEvent):
         if e.event_type == ft.FilePickerEventType.SAVE_FILE and e.path:
+            # When saving, store only the essential data, not UI references like _field
+            serializable_macro = []
+            for action in self.macro:
+                if action['type'] == 'click':
+                    serializable_macro.append({'type': 'click', 'x': action['x'], 'y': action['y'], 'button': action['button']})
+                elif action['type'] == 'delay':
+                    serializable_macro.append({'type': 'delay', 'duration': action['duration']})
+                elif action['type'] == 'key_press':
+                    # Only save essential key_press data, including hold_duration
+                    serializable_macro.append({'type': 'key_press', 'key': action['key'], 'hold_duration': action.get('hold_duration', DEFAULT_KEYPRESS_HOLD_DURATION)})
+
             with open(e.path, "w") as f:
-                json.dump(self.macro, f, indent=4)
+                json.dump(serializable_macro, f, indent=4)
         elif e.event_type == ft.FilePickerEventType.PICK_FILES and e.files:
             with open(e.files[0].path, "r") as f:
-                self.macro = json.load(f)
+                loaded_macro = json.load(f)
+                self.macro = []
+                for action in loaded_macro:
+                    if action['type'] == 'click':
+                        self.macro.append({'type': 'click', 'x': action['x'], 'y': action['y'], 'button': action.get('button', str(mouse.Button.left)), 'time': time.time()})
+                    elif action['type'] == 'delay':
+                        self.macro.append({'type': 'delay', 'duration': action['duration']})
+                    elif action['type'] == 'key_press':
+                        # Load hold_duration, defaulting if not present (for backward compatibility)
+                        self.macro.append({'type': 'key_press', 'key': action['key'], 'time': time.time(), 'hold_duration': action.get('hold_duration', DEFAULT_KEYPRESS_HOLD_DURATION)})
             self.update_macro_view()
 
     def delete_macro_action(self, index):
@@ -236,22 +326,35 @@ class AutoClickerLogic:
         self.macro_list_column.controls.clear()
         for i, action in enumerate(self.macro):
             if action['type'] == 'click':
-                x_field = ft.TextField(value=str(action['x']), width=70, dense=True, content_padding=5, expand=True)
-                y_field = ft.TextField(value=str(action['y']), width=70, dense=True, content_padding=5, expand=True)
+                # Pass self.save_macro_from_entries as on_change handler
+                x_field = ft.TextField(value=str(action['x']), width=70, dense=True, content_padding=5, expand=True, on_change=self.save_macro_from_entries)
+                y_field = ft.TextField(value=str(action['y']), width=70, dense=True, content_padding=5, expand=True, on_change=self.save_macro_from_entries)
                 action['x_field'] = x_field
                 action['y_field'] = y_field
+                button_text = "Left Click" if action['button'] == str(mouse.Button.left) else "Right Click"
                 row = ft.Row(
                     [
-                        ft.Text(f"{i+1}. Click:"), ft.Text("X:"), x_field, ft.Text("Y:"), y_field,
+                        ft.Text(f"{i+1}. {button_text}:"), ft.Text("X:"), x_field, ft.Text("Y:"), y_field,
                         ft.IconButton(ft.Icons.DELETE, on_click=lambda _, index=i: self.delete_macro_action(index))
                     ], alignment=ft.MainAxisAlignment.START, expand=True
                 )
             elif action['type'] == 'delay':
-                duration_field = ft.TextField(value=f"{action.get('duration', 0.1):.2f}", width=70, dense=True, content_padding=5, expand=True)
+                duration_field = ft.TextField(value=f"{action.get('duration', 0.1):.2f}", width=70, dense=True, content_padding=5, expand=True, on_change=self.save_macro_from_entries)
                 action['duration_field'] = duration_field
                 row = ft.Row(
                     [
                         ft.Text(f"{i+1}. Delay:"), duration_field, ft.Text("s"),
+                        ft.IconButton(ft.Icons.DELETE, on_click=lambda _, index=i: self.delete_macro_action(index))
+                    ], alignment=ft.MainAxisAlignment.START, expand=True
+                )
+            elif action['type'] == 'key_press':
+                key_field = ft.TextField(value=str(action['key']), width=100, dense=True, content_padding=5, expand=True, on_change=self.save_macro_from_entries)
+                hold_duration_field = ft.TextField(value=f"{action.get('hold_duration', DEFAULT_KEYPRESS_HOLD_DURATION):.2f}", width=70, dense=True, content_padding=5, expand=True, on_change=self.save_macro_from_entries)
+                action['key_field'] = key_field
+                action['hold_duration_field'] = hold_duration_field
+                row = ft.Row(
+                    [
+                        ft.Text(f"{i+1}. Key Press:"), key_field, ft.Text("Hold:"), hold_duration_field, ft.Text("s"),
                         ft.IconButton(ft.Icons.DELETE, on_click=lambda _, index=i: self.delete_macro_action(index))
                     ], alignment=ft.MainAxisAlignment.START, expand=True
                 )
@@ -273,7 +376,7 @@ class AutoClickerLogic:
 def main(page: ft.Page):
     page.title = "Smart AutoClicker"
     page.vertical_alignment = ft.MainAxisAlignment.START
-    page.window.width = 500
+    page.window.width = 550 # Slightly wider for new fields
     page.window.height = 800
 
     app_logic = AutoClickerLogic(page)
@@ -281,12 +384,12 @@ def main(page: ft.Page):
     # --- UI Elements ---
     button_color = ft.Colors.BLUE_700
     text_color = ft.Colors.WHITE
-    
+
     delay_entry = ft.TextField(value="0.1", width=80, dense=True, content_padding=5)
     autoclick_button = ft.ElevatedButton("Start Auto-Click (F6)", on_click=app_logic.toggle_autoclick, bgcolor=button_color, color=text_color)
     status_label = ft.Text("Status: Stopped")
     mouse_pos_label = ft.Text("Mouse Position: (0, 0)")
-    
+
     record_button = ft.ElevatedButton("Record Macro (F7)", on_click=app_logic.toggle_recording, expand=True, bgcolor=button_color, color=text_color)
     run_macro_button = ft.ElevatedButton("Run Macro (F8)", on_click=app_logic.toggle_macro, expand=True, bgcolor=button_color, color=text_color)
     save_macro_button = ft.ElevatedButton("Save Macro", on_click=app_logic.save_macro_to_file, expand=True, bgcolor=button_color, color=text_color)
@@ -295,7 +398,8 @@ def main(page: ft.Page):
     duplicate_last_button = ft.ElevatedButton("Duplicate Last", on_click=app_logic.duplicate_last_action, expand=True, bgcolor=button_color, color=text_color)
     add_click_button = ft.ElevatedButton("Add Click", on_click=app_logic.add_click_action, expand=True, bgcolor=button_color, color=text_color)
     add_delay_button = ft.ElevatedButton("Add Delay", on_click=app_logic.add_delay_action, expand=True, bgcolor=button_color, color=text_color)
-    
+    add_key_button = ft.ElevatedButton("Add Keypress", on_click=app_logic.add_key_action, expand=True, bgcolor=button_color, color=text_color)
+
     global_delay_entry = ft.TextField(value="0.1", dense=True, content_padding=5, expand=True)
     apply_global_delay_button = ft.ElevatedButton("Apply to All Delays", on_click=app_logic.apply_global_delay, bgcolor=button_color, color=text_color, expand=True)
     loop_macro_switch = ft.Switch(label="Loop Macro", value=False, on_change=app_logic.toggle_loop_macro)
@@ -344,7 +448,7 @@ def main(page: ft.Page):
                             [
                                 ft.Text("Macro Editing", weight=ft.FontWeight.BOLD),
                                 ft.Row([clear_macro_button, duplicate_last_button], alignment=ft.MainAxisAlignment.CENTER, spacing=5),
-                                ft.Row([add_click_button, add_delay_button], alignment=ft.MainAxisAlignment.CENTER, spacing=5),
+                                ft.Row([add_click_button, add_delay_button, add_key_button], alignment=ft.MainAxisAlignment.CENTER, spacing=5),
                                 ft.Row([ft.Text("Global Delay (s):"), global_delay_entry], alignment=ft.MainAxisAlignment.CENTER, spacing=5),
                                 ft.Row([apply_global_delay_button], alignment=ft.MainAxisAlignment.CENTER, spacing=5),
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5
