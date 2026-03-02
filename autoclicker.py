@@ -4,8 +4,9 @@ import time
 import json
 from pynput import mouse, keyboard
 
-# Define a default keypress hold duration
-DEFAULT_KEYPRESS_HOLD_DURATION = 0.05 # seconds (50 milliseconds)
+# Define default hold durations
+DEFAULT_KEYPRESS_HOLD_DURATION = 0.05  # seconds (50 milliseconds)
+DEFAULT_CLICK_HOLD_DURATION = 0.05     # seconds (50 milliseconds)
 
 class AutoClickerLogic:
     def __init__(self, page: ft.Page):
@@ -19,6 +20,14 @@ class AutoClickerLogic:
         self.hotkey_listener = None
         self.mouse_listener = None
         self.keyboard_listener = None
+
+        # Configurable hold durations (can be changed via Settings panel)
+        self.keypress_hold_duration = DEFAULT_KEYPRESS_HOLD_DURATION
+        self.click_hold_duration = DEFAULT_CLICK_HOLD_DURATION
+
+        # Settings UI elements
+        self.settings_keypress_entry = None
+        self.settings_click_entry = None
 
         # UI elements
         self.delay_entry = None
@@ -34,6 +43,25 @@ class AutoClickerLogic:
         self.file_picker = ft.FilePicker(on_result=self.on_file_picker_result)
         self.page.overlay.append(self.file_picker)
         self.page.update()
+
+    def set_settings_elements(self, settings_keypress_entry, settings_click_entry):
+        self.settings_keypress_entry = settings_keypress_entry
+        self.settings_click_entry = settings_click_entry
+
+    def apply_settings(self, e):
+        try:
+            kp = float(self.settings_keypress_entry.value)
+            if kp >= 0:
+                self.keypress_hold_duration = kp
+        except ValueError:
+            pass
+        try:
+            ch = float(self.settings_click_entry.value)
+            if ch >= 0:
+                self.click_hold_duration = ch
+        except ValueError:
+            pass
+        self.update_status(f"Settings applied (key hold: {self.keypress_hold_duration:.3f}s, click hold: {self.click_hold_duration:.3f}s)")
 
     def set_ui_elements(self, delay_entry, autoclick_button, status_label, record_button, run_macro_button, macro_list_column, loop_macro_switch, global_delay_entry, mouse_pos_label):
         self.delay_entry = delay_entry
@@ -91,7 +119,9 @@ class AutoClickerLogic:
     def autoclick_worker(self, delay):
         mouse_controller = mouse.Controller()
         while self.clicking:
-            mouse_controller.click(mouse.Button.left, 1)
+            mouse_controller.press(mouse.Button.left)
+            time.sleep(self.click_hold_duration)
+            mouse_controller.release(mouse.Button.left)
             time.sleep(delay)
 
     def toggle_macro(self, e):
@@ -144,7 +174,9 @@ class AutoClickerLogic:
                     button_to_click = mouse.Button.left
                     if action['button'] == str(mouse.Button.right):
                         button_to_click = mouse.Button.right
-                    mouse_controller.click(button_to_click, 1)
+                    mouse_controller.press(button_to_click)
+                    time.sleep(action.get('click_hold_duration', self.click_hold_duration))
+                    mouse_controller.release(button_to_click)
                 elif action['type'] == 'key_press':
                     key_to_press = self._parse_key_from_string(action['key'])
                     if key_to_press:
@@ -208,7 +240,7 @@ class AutoClickerLogic:
                 self.macro.append({'type': 'delay', 'duration': delay})
 
             # Store key as its string representation and include default hold duration
-            self.macro.append({'type': 'key_press', 'key': str(key), 'time': time.time(), 'hold_duration': DEFAULT_KEYPRESS_HOLD_DURATION})
+            self.macro.append({'type': 'key_press', 'key': str(key), 'time': time.time(), 'hold_duration': self.keypress_hold_duration})
             self.page.run_thread(self.update_macro_view)
 
 
@@ -231,8 +263,8 @@ class AutoClickerLogic:
         self.update_macro_view()
 
     def add_key_action(self, e):
-        # Default to 'a' key with default hold duration
-        self.macro.append({'type': 'key_press', 'key': "'a'", 'time': time.time(), 'hold_duration': DEFAULT_KEYPRESS_HOLD_DURATION})
+        # Default to 'a' key with current settings hold duration
+        self.macro.append({'type': 'key_press', 'key': "'a'", 'time': time.time(), 'hold_duration': self.keypress_hold_duration})
         self.update_macro_view()
 
     def add_delay_action(self, e):
@@ -376,8 +408,8 @@ class AutoClickerLogic:
 def main(page: ft.Page):
     page.title = "Smart AutoClicker"
     page.vertical_alignment = ft.MainAxisAlignment.START
-    page.window.width = 550 # Slightly wider for new fields
-    page.window.height = 800
+    page.window.width = 600
+    page.window.height = 860
 
     app_logic = AutoClickerLogic(page)
 
@@ -389,6 +421,19 @@ def main(page: ft.Page):
     autoclick_button = ft.ElevatedButton("Start Auto-Click (F6)", on_click=app_logic.toggle_autoclick, bgcolor=button_color, color=text_color)
     status_label = ft.Text("Status: Stopped")
     mouse_pos_label = ft.Text("Mouse Position: (0, 0)")
+
+    # Settings elements
+    settings_keypress_entry = ft.TextField(
+        value=f"{DEFAULT_KEYPRESS_HOLD_DURATION:.3f}", width=90, dense=True, content_padding=5,
+        tooltip="How long a key is held down before being released (in seconds). Increase if the game misses key presses."
+    )
+    settings_click_entry = ft.TextField(
+        value=f"{DEFAULT_CLICK_HOLD_DURATION:.3f}", width=90, dense=True, content_padding=5,
+        tooltip="How long the mouse button is held down before being released (in seconds). Increase if the game misses clicks."
+    )
+    apply_settings_button = ft.ElevatedButton(
+        "Apply", on_click=app_logic.apply_settings, bgcolor=button_color, color=text_color
+    )
 
     record_button = ft.ElevatedButton("Record Macro (F7)", on_click=app_logic.toggle_recording, expand=True, bgcolor=button_color, color=text_color)
     run_macro_button = ft.ElevatedButton("Run Macro (F8)", on_click=app_logic.toggle_macro, expand=True, bgcolor=button_color, color=text_color)
@@ -406,6 +451,7 @@ def main(page: ft.Page):
     macro_list_column = ft.Column(controls=[], expand=True, scroll=ft.ScrollMode.ALWAYS)
 
     app_logic.set_ui_elements(delay_entry, autoclick_button, status_label, record_button, run_macro_button, macro_list_column, loop_macro_switch, global_delay_entry, mouse_pos_label)
+    app_logic.set_settings_elements(settings_keypress_entry, settings_click_entry)
 
     # --- Layout ---
     page.add(
@@ -418,6 +464,25 @@ def main(page: ft.Page):
                                 ft.Text("Auto-Clicker Controls", weight=ft.FontWeight.BOLD),
                                 ft.Row([ft.Text("Click Delay (s):"), delay_entry, autoclick_button], alignment=ft.MainAxisAlignment.CENTER),
                                 status_label,
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5
+                        ), padding=5
+                    ), elevation=2, margin=ft.margin.only(bottom=5)
+                ),
+                ft.Card(
+                    content=ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Text("Settings", weight=ft.FontWeight.BOLD),
+                                ft.Row(
+                                    [
+                                        ft.Text("Key Hold (s):", tooltip="How long a key is held before release. Increase if keys are missed."),
+                                        settings_keypress_entry,
+                                        ft.Text("Click Hold (s):", tooltip="How long mouse button is held before release. Increase if clicks are missed."),
+                                        settings_click_entry,
+                                        apply_settings_button,
+                                    ],
+                                    alignment=ft.MainAxisAlignment.CENTER, spacing=8, wrap=True
+                                ),
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5
                         ), padding=5
                     ), elevation=2, margin=ft.margin.only(bottom=5)

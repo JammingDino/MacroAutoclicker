@@ -35,6 +35,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='C:\\Users\\levip\\AppData\\Local\\Temp\\dcf595b3-cb1c-4856-b1af-73facb70ff3f',
+    version='C:\\Users\\levip\\AppData\\Local\\Temp\\52d98de7-e28b-41b5-8428-ee7676b91726',
     icon=['icon.png'],
 )
